@@ -1,12 +1,16 @@
 import argparse
 import os
 import random
+import sys
 
 import numpy as np
 import soundfile as sf
 import torch
 
 from dia.model import Dia
+from dia.exceptions import DiaError, ModelLoadError, GenerationError, ValidationError
+from dia.validation import validate_output_path
+from dia.runtime_config import get_runtime_config
 
 
 def set_seed(seed: int):
@@ -23,6 +27,8 @@ def set_seed(seed: int):
 
 
 def main():
+    config = get_runtime_config()
+    
     parser = argparse.ArgumentParser(description="Generate audio using the Dia model.")
 
     parser.add_argument("text", type=str, help="Input text for speech generation.")
@@ -33,8 +39,8 @@ def main():
     parser.add_argument(
         "--repo-id",
         type=str,
-        default="nari-labs/Dia-1.6B-0626",
-        help="Hugging Face repository ID (e.g., nari-labs/Dia-1.6B-0626).",
+        default=config.default_model_repo,
+        help=f"Hugging Face repository ID (default: {config.default_model_repo}).",
     )
     parser.add_argument(
         "--local-paths", action="store_true", help="Load model from local config and checkpoint files."
@@ -54,8 +60,8 @@ def main():
     gen_group.add_argument(
         "--max-tokens",
         type=int,
-        default=None,
-        help="Maximum number of audio tokens to generate (defaults to config value).",
+        default=config.default_max_tokens,
+        help=f"Maximum number of audio tokens to generate (default: {config.default_max_tokens}).",
     )
     gen_group.add_argument(
         "--cfg-scale", type=float, default=3.0, help="Classifier-Free Guidance scale (default: 3.0)."
@@ -86,6 +92,16 @@ def main():
             parser.error(f"Config file not found: {args.config}")
         if not os.path.exists(args.checkpoint):
             parser.error(f"Checkpoint file not found: {args.checkpoint}")
+    
+    # Validate audio prompt file if provided
+    if args.audio_prompt and not os.path.exists(args.audio_prompt):
+        parser.error(f"Audio prompt file not found: {args.audio_prompt}")
+    
+    # Validate output path
+    try:
+        validate_output_path(args.output)
+    except ValidationError as e:
+        parser.error(f"Invalid output path: {e}")
 
     # Set seed if provided
     if args.seed is not None:
@@ -98,26 +114,30 @@ def main():
 
     # Load model
     print("Loading model...")
-    if args.local_paths:
-        print(f"Loading from local paths: config='{args.config}', checkpoint='{args.checkpoint}'")
-        try:
+    try:
+        if args.local_paths:
+            print(f"Loading from local paths: config='{args.config}', checkpoint='{args.checkpoint}'")
             model = Dia.from_local(args.config, args.checkpoint, device=device)
-        except Exception as e:
-            print(f"Error loading local model: {e}")
-            exit(1)
-    else:
-        print(f"Loading from Hugging Face Hub: repo_id='{args.repo_id}'")
-        try:
+        else:
+            print(f"Loading from Hugging Face Hub: repo_id='{args.repo_id}'")
             model = Dia.from_pretrained(args.repo_id, device=device)
-        except Exception as e:
-            print(f"Error loading model from Hub: {e}")
-            exit(1)
-    print("Model loaded.")
+        print("Model loaded.")
+    except ModelLoadError as e:
+        print(f"Model loading error: {e}")
+        if e.model_path:
+            print(f"Problem with file: {e.model_path}")
+        sys.exit(1)
+    except DiaError as e:
+        print(f"Dia error: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Unexpected error loading model: {e}")
+        sys.exit(1)
 
     # Generate audio
     print("Generating audio...")
     try:
-        sample_rate = 44100  # Default assumption
+        sample_rate = config.default_sample_rate
 
         output_audio = model.generate(
             text=args.text,
@@ -135,9 +155,22 @@ def main():
         sf.write(args.output, output_audio, sample_rate)
         print(f"Audio successfully saved to {args.output}")
 
+    except ValidationError as e:
+        print(f"Input validation error: {e}")
+        if e.parameter_name:
+            print(f"Problem with parameter: {e.parameter_name}")
+        sys.exit(1)
+    except GenerationError as e:
+        print(f"Generation error: {e}")
+        if e.generation_step:
+            print(f"Failed at generation step: {e.generation_step}")
+        sys.exit(1)
+    except DiaError as e:
+        print(f"Dia error: {e}")
+        sys.exit(1)
     except Exception as e:
-        print(f"Error during audio generation or saving: {e}")
-        exit(1)
+        print(f"Unexpected error during audio generation or saving: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
